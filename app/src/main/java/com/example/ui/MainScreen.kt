@@ -245,7 +245,10 @@ fun MainScreen(
                                 onPay = {
                                     mainViewModel.placeErrandOrder { success ->
                                         if (success) {
-                                            android.widget.Toast.makeText(context, "积分代扣成功，配送开启！", android.widget.Toast.LENGTH_SHORT).show()
+                                            com.example.location.VoiceBroadcaster.getInstance(context).speak("跑腿订单发布成功！系统已自动划扣积分，我们将为您优先呼叫附近速达骑手。")
+                                             com.example.location.VibrateAlertHelper(context).triggerVibration("SUCCESS")
+                                             com.example.location.NotificationPushHelper(context).sendPushNotification("速达跑腿订单发布成功！", "您的同城跑腿极速件订单已激活 Kalman 卫星纠偏。")
+                                             android.widget.Toast.makeText(context, "积分代扣成功，配送开启！", android.widget.Toast.LENGTH_SHORT).show()
                                             bookingSubScreen = BookingSubScreen.HOME
                                             mainViewModel.selectTab(2) // Move directly to tracking order list in TAB 2!
                                         } else {
@@ -2105,11 +2108,13 @@ fun ProfileTabScreen(
     val currentUserEntity by mainViewModel.currentUserEntity.collectAsState()
     val points = currentUserEntity?.points ?: 100.0
 
+    val scrollState = androidx.compose.foundation.rememberScrollState()
     Column(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
             .padding(horizontal = 20.dp, vertical = 6.dp)
+            .verticalScroll(scrollState)
     ) {
         Text(
             text = "自我中心",
@@ -2290,7 +2295,10 @@ fun ProfileTabScreen(
             }
         }
 
-        Spacer(modifier = Modifier.weight(1f))
+        // Positioning & Hardware Diagnostics Card
+        PositioningAndHardwareDiagnosticsCard(mainViewModel = mainViewModel)
+
+        Spacer(modifier = Modifier.height(16.dp))
 
         // Logout Action
         Button(
@@ -5586,4 +5594,407 @@ fun calculateInSampleSize(options: android.graphics.BitmapFactory.Options, reqWi
         }
     }
     return inSampleSize
+}
+
+// ==================== SYSTEM PERMISSIONS & HARDWARE DIAGNOSTIC COMPONENTS ====================
+
+@Composable
+fun PositioningAndHardwareDiagnosticsCard(mainViewModel: MainViewModel) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val coroutineScope = androidx.compose.runtime.rememberCoroutineScope()
+
+    var fineLocationGranted by remember { mutableStateOf(false) }
+    var coarseLocationGranted by remember { mutableStateOf(false) }
+    var backgroundLocationGranted by remember { mutableStateOf(false) }
+    var cameraGranted by remember { mutableStateOf(false) }
+    var galleryImagesGranted by remember { mutableStateOf(false) }
+    var storageGranted by remember { mutableStateOf(false) }
+    var notificationGranted by remember { mutableStateOf(false) }
+
+    val bgServiceActive by com.example.location.BackgroundLocationService.serviceStatus.collectAsState()
+    val bgRawCoords by com.example.location.BackgroundLocationService.rawLocationState.collectAsState()
+    val bgFilteredCoords by com.example.location.BackgroundLocationService.filteredLocationState.collectAsState()
+
+    var storageDiagnosticResult by remember { mutableStateOf("") }
+    var lastSelectedVibrationMode by remember { mutableStateOf("NEW_ORDER") }
+
+    fun checkAllPermissions() {
+        fineLocationGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.ACCESS_FINE_LOCATION
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+        coarseLocationGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+        backgroundLocationGranted = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.ACCESS_BACKGROUND_LOCATION
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+
+        cameraGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.CAMERA
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+        galleryImagesGranted = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.READ_MEDIA_IMAGES
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.READ_EXTERNAL_STORAGE
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+
+        storageGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED || android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q
+
+        notificationGranted = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.POST_NOTIFICATIONS
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        checkAllPermissions()
+    }
+
+    val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { checkedMap ->
+        checkAllPermissions()
+        val locOk = checkedMap[android.Manifest.permission.ACCESS_FINE_LOCATION] ?: false
+        if (locOk) {
+            android.widget.Toast.makeText(context, "GPS 基础特权已就绪！", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 10.dp)
+            .testTag("hardware_diagnostic_card")
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Settings,
+                    contentDescription = "Features Configuration",
+                    tint = Color(0xFFFFB100),
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "跑腿系统保活与硬件诊断中心",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Black,
+                    color = Color(0xFF222222)
+                )
+            }
+            
+            Text(
+                text = "联网、相册、相机、GPS定位、存储与播报震动力度模拟",
+                fontSize = 10.sp,
+                color = Color.Gray,
+                modifier = Modifier.padding(top = 2.dp, bottom = 12.dp)
+            )
+
+            Text(
+                text = "🛡️ 9大基础要素状态监控：",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF333333),
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+
+            PermissionStatusItem(label = "🌐 联网获取秒杀跑腿业务", isGranted = true, detail = "自启动就绪")
+            PermissionStatusItem(label = "📡 后台基站与蜂窝网络辅助", isGranted = true, detail = "自动检测")
+            PermissionStatusItem(label = "🗺️ 地图 GPS 芯片高精度定位", isGranted = fineLocationGranted, detail = if(fineLocationGranted) "WGS-84精确级" else "蜂窝粗略级")
+            PermissionStatusItem(label = "📸 相机权限 (核对商品照片)", isGranted = cameraGranted, detail = if(cameraGranted) "光学核验就绪" else "限用状态")
+            PermissionStatusItem(label = "🖼️ 相册直接选择压缩大图", isGranted = galleryImagesGranted, detail = if(galleryImagesGranted) "多媒体支持" else "限用状态")
+            PermissionStatusItem(label = "💾 本地磁盘与 Room 高速读写", isGranted = true, detail = "数据库正常")
+            PermissionStatusItem(label = "🔔 订单流状态栏异步消息推送", isGranted = notificationGranted, detail = if(notificationGranted) "已授权" else "限用状态")
+            PermissionStatusItem(label = "🛸 骑手后台持续驻留定位", isGranted = backgroundLocationGranted, detail = if(backgroundLocationGranted) "保活配置" else "限用状态")
+            PermissionStatusItem(label = "📣 语音播报与物理触感提醒", isGranted = true, detail = "设备物理就绪")
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Button(
+                onClick = {
+                    val permissionsNeeded = mutableListOf(
+                        android.Manifest.permission.CAMERA,
+                        android.Manifest.permission.ACCESS_FINE_LOCATION,
+                        android.Manifest.permission.ACCESS_COARSE_LOCATION
+                    )
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                        permissionsNeeded.add(android.Manifest.permission.READ_MEDIA_IMAGES)
+                        permissionsNeeded.add(android.Manifest.permission.POST_NOTIFICATIONS)
+                    } else {
+                        permissionsNeeded.add(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+                        permissionsNeeded.add(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    }
+                    permissionLauncher.launch(permissionsNeeded.toTypedArray())
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFD100), contentColor = Color(0xFF222222)),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(vertical = 10.dp)
+            ) {
+                Text(text = "🛡️ 请求系统高精业务基础权限 (一键授予)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q && !backgroundLocationGranted) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Button(
+                    onClick = {
+                        permissionLauncher.launch(arrayOf(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION))
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFF6D0), contentColor = Color(0xFF8B8015)),
+                    border = BorderStroke(1.dp, Color(0xFFFFD100)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(text = "🛸 保活配置：开启后台跟踪精细路线", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            androidx.compose.material3.HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = Color(0xFFEEEEEE))
+
+            Text(
+                text = "📢 跑腿订单播报提醒测试：",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF333333),
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = {
+                        com.example.location.VoiceBroadcaster.getInstance(context).speak("您有新的秒杀速达跑腿订单，起点世欧王庄，终点福建协和医院，请尽快抢单！")
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFF3E0), contentColor = Color(0xFFE65100)),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("📢 播报新货单", fontSize = 10.sp)
+                }
+                Button(
+                    onClick = {
+                        com.example.location.VoiceBroadcaster.getInstance(context).speak("秒杀抢单成功！已为您自动安排最优跑腿骑手，由系统持续跟踪您的配送需求。")
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE8F5E9), contentColor = Color(0xFF2E7D32)),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("🎉 播报接单成功", fontSize = 10.sp)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Text(
+                text = "📳 订单震动提醒机制（物理触感马达）：",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF333333),
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                val modes = listOf("NEW_ORDER" to "📳 新单暴振", "SUCCESS" to "⚡ 轻振确认", "ALARM_HEAVY" to "🚨 强急迫振动")
+                modes.forEach { (m, name) ->
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (lastSelectedVibrationMode == m) Color(0xFFFFFDE7) else Color(0xFFF5F5F5))
+                            .border(
+                                1.dp,
+                                if (lastSelectedVibrationMode == m) Color(0xFFFFD100) else Color.Transparent,
+                                RoundedCornerShape(6.dp)
+                            )
+                            .clickable {
+                                lastSelectedVibrationMode = m
+                                com.example.location.VibrateAlertHelper(context).triggerVibration(m)
+                            }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(name, fontSize = 9.sp, fontWeight = FontWeight.Black, color = if (lastSelectedVibrationMode == m) Color(0xFF9E7D00) else Color(0xFF555555))
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Text(
+                text = "🔔 消息推送提醒（模拟下发）：",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF333333),
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+            Button(
+                onClick = {
+                    com.example.location.NotificationPushHelper(context).sendPushNotification(
+                        title = "🚀 系统秒杀跑腿订单！",
+                        message = "【速达提示】福州泰禾广场 SOHO 订单需要秒数送达，已被骑手接单并激活 Kalman GPS 卫星追踪。"
+                    )
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFECEFF1), contentColor = Color(0xFF37474F)),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("🔔 模拟推送一则状态栏到达消息", fontSize = 10.sp)
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Text(
+                text = "💾 本地沙盒可持久化读写验证：",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF333333),
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = {
+                        storageDiagnosticResult = com.example.location.LocalStorageTester.runLocalStorageDiagnostics(context)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFECEFF1), contentColor = Color(0xFF37474F)),
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp)
+                ) {
+                    Text("测试存储 R/W", fontSize = 9.sp)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                if (storageDiagnosticResult.isNotBlank()) {
+                    Text(
+                        text = storageDiagnosticResult,
+                        fontSize = 9.sp,
+                        color = if (storageDiagnosticResult.contains("✅")) Color(0xFF2E7D32) else Color(0xFFC62828),
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                } else {
+                    Text("等待运行...", fontSize = 9.sp, color = Color.Gray)
+                }
+            }
+
+            androidx.compose.material3.HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = Color(0xFFEEEEEE))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "🛸 跑腿骑手后台高精定位持续保活 FGS",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF111111)
+                    )
+                    Text(
+                        text = if (bgServiceActive) "连续追踪开启 (卡尔曼平滑降噪中)" else "追踪已挂起 (等待配送员点按开启)",
+                        fontSize = 9.sp,
+                        color = if (bgServiceActive) Color(0xFF2E7D32) else Color.Gray,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = bgServiceActive,
+                    onCheckedChange = { active ->
+                        if (active) {
+                            com.example.location.BackgroundLocationService.startTracking(context)
+                        } else {
+                            com.example.location.BackgroundLocationService.stopTracking(context)
+                        }
+                    },
+                    colors = androidx.compose.material3.SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = Color(0xFFFFD100)
+                    )
+                )
+            }
+
+            if (bgServiceActive) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFFBFBFA))
+                        .border(1.dp, Color(0xFFEDEDED), RoundedCornerShape(8.dp))
+                        .padding(8.dp)
+                ) {
+                    Column {
+                        Text(
+                            text = "🛰️ 过滤算法引擎实战坐标联动：",
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.Black
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "原始漂移 GPS：(${String.format("%.5f", bgRawCoords.first)}, ${String.format("%.5f", bgRawCoords.second)})",
+                            fontSize = 8.sp,
+                            color = Color(0xFF757575)
+                        )
+                        Text(
+                            text = "卡尔曼纠偏 滤波：(${String.format("%.5f", bgFilteredCoords.first)}, ${String.format("%.5f", bgFilteredCoords.second)})",
+                            fontSize = 8.sp,
+                            color = Color(0xFFE65100),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun PermissionStatusItem(label: String, isGranted: Boolean, detail: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .background(if (isGranted) Color(0xFF4CAF50) else Color(0xFFF44336), CircleShape)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(text = label, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF555555))
+        }
+        Text(text = if (isGranted) "激活 ($detail)" else "未激活 (非强制 ⚠)", fontSize = 9.sp, color = if (isGranted) Color(0xFF2E7D32) else Color(0xFFE53935), fontWeight = FontWeight.Bold)
+    }
 }

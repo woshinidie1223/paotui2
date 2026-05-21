@@ -12,9 +12,7 @@ import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.ResponseBody.Companion.toResponseBody
@@ -130,9 +128,9 @@ class NetworkClient(private val context: Context, private val appDao: AppDao, pr
     // OkHttp Client with custom timeouts based on request level header
     val okHttpClient: OkHttpClient = OkHttpClient.Builder()
         .addInterceptor(MockNetworkInterceptor())
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
-        .writeTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(1500, TimeUnit.MILLISECONDS)
+        .readTimeout(1500, TimeUnit.MILLISECONDS)
+        .writeTimeout(1500, TimeUnit.MILLISECONDS)
         .addInterceptor { chain ->
             val request = chain.request()
             val levelHeader = request.header("Request-Level")
@@ -279,22 +277,19 @@ class NetworkClient(private val context: Context, private val appDao: AppDao, pr
                 }
 
                 // Database operation on OkHttp Interceptor Background Thread
-                val registeredUser: UserEntity?
-                runBlocking {
-                    val existing = appDao.getUserByEmail(email)
-                    if (existing != null) {
-                        registeredUser = null
-                    } else {
-                        val newUser = UserEntity(
-                            email = email,
-                            nickname = nickname,
-                            passwordHash = password // Simply store it
-                        )
-                        appDao.insertUser(newUser)
-                        registeredUser = newUser
-                        // Remove code after successful registration
-                        emailOtpCache.remove(email)
-                    }
+                val existing = appDao.getUserByEmailSync(email)
+                val registeredUser: UserEntity? = if (existing != null) {
+                    null
+                } else {
+                    val newUser = UserEntity(
+                        email = email,
+                        nickname = nickname,
+                        passwordHash = password // Simply store it
+                    )
+                    appDao.insertUserSync(newUser)
+                    // Remove code after successful registration
+                    emailOtpCache.remove(email)
+                    newUser
                 }
 
                 if (registeredUser == null) {
@@ -328,12 +323,11 @@ class NetworkClient(private val context: Context, private val appDao: AppDao, pr
                 val email = loginBody.email.trim().lowercase()
                 val password = loginBody.passwordHash
 
-                var user: UserEntity? = null
-                runBlocking {
-                    val dbUser = appDao.getUserByEmail(email)
-                    if (dbUser != null && dbUser.passwordHash == password) {
-                        user = dbUser
-                    }
+                val dbUser = appDao.getUserByEmailSync(email)
+                val user: UserEntity? = if (dbUser != null && dbUser.passwordHash == password) {
+                    dbUser
+                } else {
+                    null
                 }
 
                 if (user == null) {
@@ -356,11 +350,7 @@ class NetworkClient(private val context: Context, private val appDao: AppDao, pr
 
         private fun handleGetProducts(request: Request): Response {
             return try {
-                var productsList = emptyList<ProductEntity>()
-                runBlocking {
-                    // Let's get list from database
-                    productsList = appDao.getAllProductsFlow().first()
-                }
+                val productsList = appDao.getAllProductsSync()
 
                 val type = Types.newParameterizedType(ApiResponse::class.java, Types.newParameterizedType(List::class.java, ProductEntity::class.java))
                 val apiResponse = ApiResponse(
@@ -394,64 +384,57 @@ class NetworkClient(private val context: Context, private val appDao: AppDao, pr
                 var responseMessage: String = "秒杀成功！已为您自动安排最优跑腿骑手进行急速配送"
                 var orderEntity: OrderEntity? = null
 
-                runBlocking {
-                    val product = appDao.getProductById(productId)
-                    if (product == null) {
-                        responseCode = 1001
-                        responseMessage = "该秒杀商品不存在！"
-                        return@runBlocking
-                    }
-
+                val product = appDao.getProductByIdSync(productId)
+                if (product == null) {
+                    responseCode = 1001
+                    responseMessage = "该秒杀商品不存在！"
+                } else {
                     // Check time limits
                     val now = System.currentTimeMillis()
                     if (now < product.startTimeMills) {
                         responseCode = 1001
                         responseMessage = "秒杀尚未开始，请耐心等待！"
-                        return@runBlocking
-                    }
-                    if (now > product.endTimeMills) {
+                    } else if (now > product.endTimeMills) {
                         responseCode = 1001
                         responseMessage = "秒杀已结束！"
-                        return@runBlocking
-                    }
-
-                    // Check duplicate purchase logic (Mocked 1 buy per user)
-                    // If user has orders for this item in the orders table
-                    val existingOrders = appDao.getOrdersByEmailFlow(email).first()
-                    val alreadyBought = existingOrders.any { it.itemName.contains(product.name) }
-                    if (alreadyBought) {
-                        responseCode = 1001
-                        responseMessage = "对不起，本商品每人限购1件，您已抢购成功，请前往订单查看！"
-                        return@runBlocking
-                    }
-
-                    // Attempt stock decrement atomic transaction
-                    val rowsUpdated = appDao.decrementStock(productId)
-                    if (rowsUpdated > 0) {
-                        // Success! Generate dispatch order
-                        val orderId = "sk_ord_${UUID.randomUUID().toString().take(8)}"
-                        val newOrder = OrderEntity(
-                            id = orderId,
-                            userEmail = email,
-                            type = "BUY",
-                            itemName = "【秒杀抢购】${product.name}",
-                            notes = "极速秒杀件！商品原价¥${product.originalPrice}，秒杀全包价¥${product.seckillPrice}！货款已付，请骑手即刻送达！",
-                            fromAddress = "速达自营秒杀仓 (北京市大兴区科创十一街)",
-                            toAddress = "您的收货地址 (系统就近定位)",
-                            tip = 15.0, // High runner tip on flash seckill!
-                            distance = 3.2,
-                            status = "SUBMITTED",
-                            runnerName = "速达先锋骑手 张力",
-                            runnerPhone = "13800008888"
-                        )
-                        appDao.insertOrder(newOrder)
-                        orderEntity = newOrder
-
-                        // Launch a simulator coroutine to advance order dispatch stages in database!
-                        simulateOrderStatusTransitions(orderId)
                     } else {
-                        responseCode = 1003
-                        responseMessage = "对不起，抢购人数过多，商品已被瞬间秒杀一空！"
+                        // Check duplicate purchase logic (Mocked 1 buy per user)
+                        // If user has orders for this item in the orders table
+                        val existingOrders = appDao.getOrdersByEmailSync(email)
+                        val alreadyBought = existingOrders.any { it.itemName.contains(product.name) }
+                        if (alreadyBought) {
+                            responseCode = 1001
+                            responseMessage = "对不起，本商品每人限购1件，您已抢购成功，请前往订单查看！"
+                        } else {
+                            // Attempt stock decrement atomic transaction
+                            val rowsUpdated = appDao.decrementStockSync(productId)
+                            if (rowsUpdated > 0) {
+                                // Success! Generate dispatch order
+                                val orderId = "sk_ord_${UUID.randomUUID().toString().take(8)}"
+                                val newOrder = OrderEntity(
+                                    id = orderId,
+                                    userEmail = email,
+                                    type = "BUY",
+                                    itemName = "【秒杀抢购】${product.name}",
+                                    notes = "极速秒杀件！商品原价¥${product.originalPrice}，秒杀全包价¥${product.seckillPrice}！货款已付，请骑手即刻送达！",
+                                    fromAddress = "速达自营秒杀仓 (北京市大兴区科创十一街)",
+                                    toAddress = "您的收货地址 (系统就近定位)",
+                                    tip = 15.0, // High runner tip on flash seckill!
+                                    distance = 3.2,
+                                    status = "SUBMITTED",
+                                    runnerName = "速达先锋骑手 张力",
+                                    runnerPhone = "13800008888"
+                                )
+                                appDao.insertOrderSync(newOrder)
+                                orderEntity = newOrder
+
+                                // Launch a simulator coroutine to advance order dispatch stages in database!
+                                simulateOrderStatusTransitions(orderId)
+                            } else {
+                                responseCode = 1003
+                                responseMessage = "对不起，抢购人数过多，商品已被瞬间秒杀一空！"
+                            }
+                        }
                     }
                 }
 
@@ -499,9 +482,7 @@ class NetworkClient(private val context: Context, private val appDao: AppDao, pr
                     runnerPhone = ""
                 )
 
-                runBlocking {
-                    appDao.insertOrder(newOrder)
-                }
+                appDao.insertOrderSync(newOrder)
 
                 // Simulate order lifecycle in background!
                 simulateOrderStatusTransitions(orderId)
@@ -523,10 +504,7 @@ class NetworkClient(private val context: Context, private val appDao: AppDao, pr
         private fun handleGetOrders(request: Request): Response {
             return try {
                 val email = request.url.queryParameter("email") ?: ""
-                var ordersList = emptyList<OrderEntity>()
-                runBlocking {
-                    ordersList = appDao.getOrdersByEmailFlow(email).first()
-                }
+                val ordersList = appDao.getOrdersByEmailSync(email)
 
                 val type = Types.newParameterizedType(ApiResponse::class.java, Types.newParameterizedType(List::class.java, OrderEntity::class.java))
                 val apiResponse = ApiResponse(

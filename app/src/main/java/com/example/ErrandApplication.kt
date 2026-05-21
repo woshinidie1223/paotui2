@@ -5,7 +5,9 @@ import com.example.db.AppDatabase
 import com.example.db.AppRepository
 import com.example.network.NetworkClient
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class ErrandApplication : Application() {
     private val applicationScope = CoroutineScope(SupervisorJob())
@@ -17,5 +19,8 @@ class ErrandApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         // Prefetch products right away to ensure they populate promptly
+        applicationScope.launch(Dispatchers.IO) {
+            com.example.location.TencentMapHelper.verifyTencentApiKeyDiagnostics()
+        }
     }
 }

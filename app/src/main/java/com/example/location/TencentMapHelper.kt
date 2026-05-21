@@ -19,8 +19,10 @@ data class TencentPoi(
 )
 
 object TencentMapHelper {
-    private val API_KEY = if (BuildConfig.TENCENT_MAP_KEY.isNotBlank() && !BuildConfig.TENCENT_MAP_KEY.startsWith("MY_")) BuildConfig.TENCENT_MAP_KEY else "T3XBZ-EYLLQ-2CD5S-B7XE6-XOCQV-DBF3P"
-    private val SK = if (BuildConfig.TENCENT_MAP_SK.isNotBlank() && !BuildConfig.TENCENT_MAP_SK.startsWith("MY_")) BuildConfig.TENCENT_MAP_SK else "G7t5UrkzbiQFVSJONtupGo8yEbxiGzTV"
+    val API_KEY = if (BuildConfig.TENCENT_MAP_KEY.isNotBlank() && !BuildConfig.TENCENT_MAP_KEY.startsWith("MY_")) BuildConfig.TENCENT_MAP_KEY else "T3XBZ-EYLLQ-2CD5S-B7XE6-XOCQV-DBF3P"
+    val SK = if (BuildConfig.TENCENT_MAP_SK.isNotBlank() && !BuildConfig.TENCENT_MAP_SK.startsWith("MY_")) BuildConfig.TENCENT_MAP_SK else "G7t5UrkzbiQFVSJONtupGo8yEbxiGzTV"
+
+    var isSignatureEnabled = true // Can be toggled manually or auto-corrected on diagnostics failure
 
     fun md5(input: String): String {
         return try {
@@ -35,16 +37,20 @@ object TencentMapHelper {
 
     fun signUrl(path: String, params: Map<String, String>): String {
         val sortedKeys = params.keys.sorted()
+        val encodedQuery = sortedKeys.joinToString("&") { key ->
+            val value = params[key] ?: ""
+            "$key=${URLEncoder.encode(value, "UTF-8")}"
+        }
+
+        if (!isSignatureEnabled) {
+            return "https://apis.map.qq.com$path?$encodedQuery"
+        }
+
         val paramString = sortedKeys.joinToString("&") { key ->
             "$key=${params[key]}"
         }
         val stringToSign = "$path?$paramString$SK"
         val sig = md5(stringToSign)
-        
-        val encodedQuery = sortedKeys.joinToString("&") { key ->
-            val value = params[key] ?: ""
-            "$key=${URLEncoder.encode(value, "UTF-8")}"
-        }
         return "https://apis.map.qq.com$path?$encodedQuery&sig=$sig"
     }
 
@@ -251,5 +257,71 @@ object TencentMapHelper {
                 Math.sin(dLon / 2) * Math.sin(dLon / 2)
         val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
         return rEarth * c
+    }
+
+    // 6. Run diagnostics on Key & SK on app startup to output any authorization or signature failures in Logcat
+    suspend fun verifyTencentApiKeyDiagnostics(): String = withContext(Dispatchers.IO) {
+        try {
+            Log.i("TencentDiagnostics", "Starting Tencent Map API Key Diagnostics...")
+            Log.i("TencentDiagnostics", "Current API Key: ${if(API_KEY.length > 8) API_KEY.take(8) + "..." else API_KEY} (Length: ${API_KEY.length})")
+            Log.i("TencentDiagnostics", "Current SK Key: ${if(SK.length > 4) SK.take(4) + "..." else SK} (Length: ${SK.length})")
+            
+            // Query for Shanghai Center coordinates reverse-geocoding as a test probe
+            val url = signUrl("/ws/geocoder/v1", mapOf(
+                "key" to API_KEY,
+                "location" to "31.2304,121.4737"
+            ))
+            Log.i("TencentDiagnostics", "Generated probe request URL: $url")
+            val jsonStr = fetchUrl(url)
+            if (jsonStr.isBlank()) {
+                val errorMsg = "🛑 Diagnostic error: Received completely blank response from Tencent Map endpoint."
+                Log.e("TencentDiagnostics", errorMsg)
+                return@withContext errorMsg
+            }
+            
+            val json = JSONObject(jsonStr)
+            val status = json.optInt("status", -1)
+            val message = json.optString("message", "unknown")
+            
+            if (status == 0) {
+                val successMsg = "✅ Tencent Map API WebService signature and authorization verified successfully!"
+                Log.i("TencentDiagnostics", successMsg)
+                return@withContext successMsg
+            } else {
+                if (status == 111 || status == 110) {
+                    Log.w("TencentDiagnostics", "Failed with status $status. Probing fallback by temporarily disabling Signature query...")
+                    isSignatureEnabled = false
+                    val probeUrl = signUrl("/ws/geocoder/v1", mapOf(
+                        "key" to API_KEY,
+                        "location" to "31.2304,121.4737"
+                    ))
+                    val probeStr = fetchUrl(probeUrl)
+                    if (probeStr.isNotBlank()) {
+                        val probeJson = JSONObject(probeStr)
+                        if (probeJson.optInt("status", -1) == 0) {
+                            val correctionMsg = "🎉 [签名校验自动纠错成功] 检测到您的腾讯定位Key不需要签名校验(或SK未启用)。系统已为您自动关闭 signature verify，地图道路及逆地理编码立即成功显示！"
+                            Log.i("TencentDiagnostics", correctionMsg)
+                            return@withContext correctionMsg
+                        }
+                    }
+                    // Restore signature setting if bypass did not resolve the problem
+                    isSignatureEnabled = true
+                }
+
+                val errorMsg = when (status) {
+                    110 -> "🛑 status 110: Request source unauthorized or package name mismatch. Please check your Tencent Map Developer Console's Key whitelist/restrictions!"
+                    111 -> "🛑 status 111: WebService signature verification failed. The provided TENCENT_MAP_SK secret key ($SK) does not match the TENCENT_MAP_KEY!"
+                    311 -> "🛑 status 311: WebService key has expired, is locked, or is disabled on the Tencent Map console."
+                    310 -> "🛑 status 310: API key is invalid or not registered."
+                    else -> "🛑 status $status: $message. Please check your Tencent Map Developer Console configurations."
+                }
+                Log.e("TencentDiagnostics", errorMsg)
+                return@withContext errorMsg
+            }
+        } catch (e: Exception) {
+            val errorMsg = "🛑 Exception occurred during Tencent Map key diagnostics: ${e.localizedMessage}"
+            Log.e("TencentDiagnostics", errorMsg, e)
+            return@withContext errorMsg
+        }
     }
 }
