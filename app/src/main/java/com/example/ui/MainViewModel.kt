@@ -220,6 +220,7 @@ class MainViewModel(private val repository: AppRepository) : ViewModel() {
             _toAddress.value = address
         }
         _showMapSelector.value = false
+        triggerActualDistanceCalculation()
     }
 
     fun refreshOrders() {
@@ -292,10 +293,49 @@ class MainViewModel(private val repository: AppRepository) : ViewModel() {
         }
     }
 
+    private var distanceCalcJob: Job? = null
+
+    fun triggerActualDistanceCalculation() {
+        distanceCalcJob?.cancel()
+        distanceCalcJob = viewModelScope.launch {
+            try {
+                val fromAddr = _fromAddress.value
+                val toAddr = _toAddress.value
+                
+                if (fromAddr.isNotBlank() && toAddr.isNotBlank() && 
+                    !fromAddr.contains("就近") && !fromAddr.contains("便利店") &&
+                    !toAddr.contains("就近")
+                ) {
+                    val fromCoords = com.example.location.TencentMapHelper.getCoordinateFromAddress(fromAddr)
+                    val toCoords = com.example.location.TencentMapHelper.getCoordinateFromAddress(toAddr)
+                    
+                    if (fromCoords != null && toCoords != null) {
+                        val distKm = com.example.location.TencentMapHelper.getHaversineDistanceKm(
+                            fromCoords.first, fromCoords.second,
+                            toCoords.first, toCoords.second
+                        )
+                        // Round to 1 decimal, minimum 0.5km
+                        val finalizedDist = ((distKm * 10.0).toInt() / 10.0).coerceAtLeast(0.5)
+                        _distance.value = finalizedDist
+                        Log.i("MainViewModel", "Tencent Maps Geocoder triggered distance recalculation: ${finalizedDist}km")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Failed to compute Tencent GPS distance", e)
+            }
+        }
+    }
+
     fun updateItemName(value: String) { _itemName.value = value }
     fun updateNotes(value: String) { _notes.value = value }
-    fun updateFromAddress(value: String) { _fromAddress.value = value }
-    fun updateToAddress(value: String) { _toAddress.value = value }
+    fun updateFromAddress(value: String) { 
+        _fromAddress.value = value 
+        triggerActualDistanceCalculation()
+    }
+    fun updateToAddress(value: String) { 
+        _toAddress.value = value 
+        triggerActualDistanceCalculation()
+    }
     fun updateTipFee(value: Double) { _tipFee.value = value }
     fun updateDistance(value: Double) { _distance.value = value }
 
@@ -834,31 +874,58 @@ class MainViewModel(private val repository: AppRepository) : ViewModel() {
                     _userCoordinates.value = Pair(lat, lng)
                     _locationMessage.value = "自动首页GPS定位成功！坐标：(${"%.5f".format(lat)}, ${"%.5f".format(lng)})"
                     
-                    // Reverse geocoding
-                    val geocoder = Geocoder(context, Locale.getDefault())
+                    // Reverse geocoding via Tencent Maps as primary, standard Geocoder as secondary fallback
                     var resolvedName: String? = null
                     try {
-                        val addresses = geocoder.getFromLocation(lat, lng, 1)
-                        if (!addresses.isNullOrEmpty()) {
-                            val address = addresses[0]
-                            val featureName = address.featureName
-                            val subLocality = address.subLocality ?: ""
-                            val thoroughfare = address.thoroughfare ?: ""
-                            
+                        val tencentResult = com.example.location.TencentMapHelper.getAddressAndPoisFromCoordinate(lat, lng)
+                        if (tencentResult != null) {
+                            val fullAddr = tencentResult.first
                             resolvedName = when {
-                                !featureName.isNullOrBlank() -> featureName
-                                !thoroughfare.isNullOrBlank() -> thoroughfare
-                                !subLocality.isNullOrBlank() -> subLocality
-                                else -> address.locality ?: "当前定位"
+                                fullAddr.contains("北京市") -> "北京市"
+                                fullAddr.contains("上海市") -> "上海市"
+                                fullAddr.contains("广州市") -> "广州市"
+                                fullAddr.contains("深圳市") -> "深圳市"
+                                fullAddr.contains("杭州市") -> "杭州市"
+                                else -> {
+                                    val regexMatch = Regex("省|市|区").find(fullAddr)
+                                    if (regexMatch != null) {
+                                        fullAddr.substring(0, regexMatch.range.last + 1)
+                                    } else {
+                                        "上海市"
+                                    }
+                                }
                             }
+                            Log.i("MainViewModel", "Resolved header city via Tencent: $resolvedName")
                         }
                     } catch (e: Exception) {
-                        Log.e("MainViewModel", "Geocoder error, using simulated address", e)
+                        Log.e("MainViewModel", "Tencent reverse geocoding error for header", e)
                     }
 
                     if (resolvedName.isNullOrBlank()) {
-                        val streetList = listOf("张江高科园", "武康路老街", "静安寺愚园路", "南京东路步行街", "淮海中路新天地", "陆家嘴绿地")
-                        resolvedName = streetList.random()
+                        val geocoder = Geocoder(context, Locale.getDefault())
+                        try {
+                            val addresses = geocoder.getFromLocation(lat, lng, 1)
+                            if (!addresses.isNullOrEmpty()) {
+                                val address = addresses[0]
+                                val locality = address.locality
+                                val adminArea = address.adminArea
+                                val subLocality = address.subLocality ?: ""
+                                
+                                resolvedName = when {
+                                    !locality.isNullOrBlank() -> locality
+                                    !adminArea.isNullOrBlank() -> adminArea
+                                    !subLocality.isNullOrBlank() -> subLocality
+                                    else -> "上海市"
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.e("MainViewModel", "Geocoder error, using simulated address", e)
+                        }
+                    }
+
+                    if (resolvedName.isNullOrBlank() || resolvedName.matches(Regex("\\d+.*"))) {
+                        val cityList = listOf("上海市", "北京市", "深圳市", "广州市", "杭州市")
+                        resolvedName = cityList.random()
                     }
                     
                     _headerLocationName.value = resolvedName
@@ -869,16 +936,16 @@ class MainViewModel(private val repository: AppRepository) : ViewModel() {
                     val lng = 121.4737 + randomLngShift
                     
                     _userCoordinates.value = Pair(lat, lng)
-                    val simulatedLocs = listOf("上海张江科技园", "徐汇漕河泾开发区", "静安区嘉里中心", "浦东陆家嘴绿地")
+                    val simulatedLocs = listOf("上海市", "北京市", "深圳市", "广州市")
                     _headerLocationName.value = simulatedLocs.random()
                     _locationMessage.value = "未获取到物理GPS，已自动进行火星校准模拟首页定位。"
                 }
             } catch (e: SecurityException) {
-                _headerLocationName.value = "上海科技园"
+                _headerLocationName.value = "上海市"
                 _locationMessage.value = "定位权限已被拒绝，进入默认演示坐标。"
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 Log.e("MainViewModel", "autoLocError", e)
-                _headerLocationName.value = "上海科技园"
+                _headerLocationName.value = "上海市"
                 _locationMessage.value = "定位初始化异常: ${e.localizedMessage}"
             } finally {
                 _isAcquiringLocation.value = false
@@ -909,29 +976,41 @@ class MainViewModel(private val repository: AppRepository) : ViewModel() {
                     _userCoordinates.value = Pair(lat, lng)
                     _locationMessage.value = "高精度GPS定位成功：(${"%.5f".format(lat)}, ${"%.5f".format(lng)})"
                     
-                    // Reverse geocoding via standard Geocoder
-                    val geocoder = Geocoder(context, java.util.Locale.getDefault())
+                    // Reverse geocoding via Tencent Maps as primary, standard Geocoder as secondary fallback
                     var parsed: String? = null
                     try {
-                        val addresses = geocoder.getFromLocation(lat, lng, 1)
-                        if (!addresses.isNullOrEmpty()) {
-                            val addr = addresses[0]
-                            val feature = addr.featureName
-                            val subLoc = addr.subLocality ?: ""
-                            val thoroughfare = addr.thoroughfare ?: ""
-                            val adminArea = addr.adminArea ?: ""
-                            val locality = addr.locality ?: ""
-                            
-                            val detail = when {
-                                !feature.isNullOrBlank() -> feature
-                                !thoroughfare.isNullOrBlank() -> thoroughfare
-                                !subLoc.isNullOrBlank() -> subLoc
-                                else -> "未知详细位置"
-                            }
-                            parsed = "$adminArea$locality$subLoc$thoroughfare$detail".ifBlank { null }
+                        val tencentResult = com.example.location.TencentMapHelper.getAddressAndPoisFromCoordinate(lat, lng)
+                        if (tencentResult != null) {
+                            parsed = tencentResult.first
+                            Log.i("MainViewModel", "Reverse geocoded address via Tencent successful: $parsed")
                         }
                     } catch (e: Exception) {
-                        Log.e("MainViewModel", "Detailed reverse geocoding error", e)
+                        Log.e("MainViewModel", "Tencent reverse geocoding in detailed view failed", e)
+                    }
+
+                    if (parsed == null) {
+                        val geocoder = Geocoder(context, java.util.Locale.getDefault())
+                        try {
+                            val addresses = geocoder.getFromLocation(lat, lng, 1)
+                            if (!addresses.isNullOrEmpty()) {
+                                val addr = addresses[0]
+                                val feature = addr.featureName
+                                val subLoc = addr.subLocality ?: ""
+                                val thoroughfare = addr.thoroughfare ?: ""
+                                val adminArea = addr.adminArea ?: ""
+                                val locality = addr.locality ?: ""
+                                
+                                val detail = when {
+                                    !feature.isNullOrBlank() -> feature
+                                    !thoroughfare.isNullOrBlank() -> thoroughfare
+                                    !subLoc.isNullOrBlank() -> subLoc
+                                    else -> "未知详细位置"
+                                }
+                                parsed = "$adminArea$locality$subLoc$thoroughfare$detail".ifBlank { null }
+                            }
+                        } catch (e: Exception) {
+                            Log.e("MainViewModel", "Detailed reverse geocoding error fallback", e)
+                        }
                     }
 
                     if (parsed == null) {
@@ -964,7 +1043,7 @@ class MainViewModel(private val repository: AppRepository) : ViewModel() {
                     _toAddress.value = sampleLoc
                 }
                 onCompletion(sampleLoc)
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 Log.e("MainViewModel", "autoAcquireDetailedLocation error", e)
                 _locationMessage.value = "定位服务异常: ${e.localizedMessage}"
                 val sampleLoc = if (targetField == "FROM") "上海科技园 A座 1003室" else "上海中心大厦 2603室"

@@ -4,6 +4,8 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectDragGestures
+import coil.compose.AsyncImage
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.foundation.BorderStroke
@@ -96,6 +98,7 @@ fun MainScreen(
     }
 
     LaunchedEffect(Unit) {
+        delay(800)
         val fineGranted = androidx.core.content.ContextCompat.checkSelfPermission(
             context,
             android.Manifest.permission.ACCESS_FINE_LOCATION
@@ -2610,53 +2613,142 @@ fun IntelligentMapSelectorDialog(
     val context = androidx.compose.ui.platform.LocalContext.current
     var searchQuery by remember { mutableStateOf("") }
     var selectedPointName by remember { mutableStateOf("") }
+    val coroutineScope = androidx.compose.runtime.rememberCoroutineScope()
     
-    // Map view parameters for interactive pan/offset simulation
-    var mapScrollX by remember { mutableStateOf(0f) }
-    var mapScrollY by remember { mutableStateOf(0f) }
-    
-    // GPS targeting pulse animation
-    val infiniteTransition = rememberInfiniteTransition(label = "gpsPulse")
-    val pulseRadius by infiniteTransition.animateFloat(
-        initialValue = 10f,
-        targetValue = 60f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1800, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "radius"
-    )
-    val pulseAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.8f,
-        targetValue = 0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1800, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "alpha"
-    )
+    // Online vs Offline Fujian Mode state
+    var isFujianOfflineMode by remember { mutableStateOf(false) }
 
-    // Pre-pinned hotspots in Shanghai
-    val allHotspots = listOf(
-        "上海浦东张江高科技园 A区 5号楼",
-        "静安里·静安嘉里中心二期写字楼",
-        "徐家汇美罗城百脑汇商业广场 B1层",
-        "上海虹桥枢纽港出发航站厅一等座通道",
-        "徐汇滨江龙腾大道滨水艺术营地",
-        "曹家渡老街弄堂本帮精品配售大厅",
-        "同济大学杨浦校区正校门北侧 102室",
-        "浦东陆家嘴环路环球金融商厦 R栋"
-    )
+    // Tencent Map States
+    var mapCenterLat by remember { mutableStateOf(31.2304) }
+    var mapCenterLng by remember { mutableStateOf(121.4737) }
+    var zoomLevel by remember { mutableStateOf(16) }
+    var tencentPois by remember { mutableStateOf<List<com.example.location.TencentPoi>>(emptyList()) }
+    var isSearching by remember { mutableStateOf(false) }
 
-    val filteredHotspots = if (searchQuery.isBlank()) {
-        allHotspots
-    } else {
-        allHotspots.filter { it.contains(searchQuery) }
+    // Helper for categorization of POIs (Residential, Stores, Street addresses)
+    fun getPoiCategoryBadge(title: String, address: String): Triple<String, Color, Color> {
+        val text = (title + " " + address).lowercase()
+        return when {
+            text.contains("小区") || text.contains("住宅") || text.contains("庭苑") || text.contains("华府") || text.contains("王庄") || text.contains("香槟国际") || text.contains("公寓") || text.contains("阁") || text.contains("栋") || text.contains("宿舍") || text.contains("海景") || text.contains("生活区") -> 
+                Triple("🏡 小区", Color(0xFFE8F5E9), Color(0xFF2E7D32)) // Soft Green
+            text.contains("广场") || text.contains("百货") || text.contains("中心") || text.contains("商场") || text.contains("万达") || text.contains("中华城") || text.contains("商圈") || text.contains("宜家") || text.contains("百货") || text.contains("大厦") || text.contains("大楼") || text.contains("写字楼") || text.contains("楼") || text.contains("店") || text.contains("阁") || text.contains("sm") || text.contains("soho") -> 
+                Triple("🏬 店铺", Color(0xFFE3F2FD), Color(0xFF1565C0)) // Soft Blue
+            text.contains("号") || text.contains("路") || text.contains("街") || text.contains("门牌") || text.contains("弄") || text.contains("大门") -> 
+                Triple("📮 门牌号", Color(0xFFFFF3E0), Color(0xFFE65100)) // Soft Orange
+            else -> 
+                Triple("📍 地标", Color(0xFFF3E5F5), Color(0xFF7B1FA2)) // Soft Purple
+        }
     }
 
-    // Default immediate selection
+    // Synchronize initial dialog center coordinate based on from/to coordinates
     LaunchedEffect(Unit) {
-        selectedPointName = if (targetField == "FROM") "上海浦东张江高科技园 A区 5号楼" else "静安里·静安嘉里中心二期写字楼"
+        val currentAddr = if (targetField == "FROM") mainViewModel.fromAddress.value else mainViewModel.toAddress.value
+        if (currentAddr.isNotBlank() && !currentAddr.contains("就近")) {
+            if (currentAddr.contains("福建") || currentAddr.contains("福州") || currentAddr.contains("厦门") || currentAddr.contains("泉州") || currentAddr.contains("漳州")) {
+                isFujianOfflineMode = true
+            }
+            val coords = com.example.location.TencentMapHelper.getCoordinateFromAddress(currentAddr)
+            if (coords != null) {
+                mapCenterLat = coords.first
+                mapCenterLng = coords.second
+            }
+        } else {
+            // Default center is Shanghai, or Fuzhou if Fujian mode toggled
+            if (isFujianOfflineMode) {
+                mapCenterLat = 26.0745
+                mapCenterLng = 119.2965
+            } else {
+                mapCenterLat = 31.2304
+                mapCenterLng = 121.4737
+            }
+        }
+    }
+
+    // Handle offline vs online transition resets
+    LaunchedEffect(isFujianOfflineMode) {
+        if (isFujianOfflineMode) {
+            // Set default center to Fuzhou core coordinates
+            mapCenterLat = 26.0745
+            mapCenterLng = 119.2965
+            val offlineResult = com.example.location.TencentMapHelper.searchOfflineFujian(searchQuery)
+            tencentPois = offlineResult
+            if (offlineResult.isNotEmpty()) {
+                selectedPointName = offlineResult[0].title + " (" + offlineResult[0].address + ")"
+            }
+        } else {
+            // Reset to Shanghai core
+            mapCenterLat = 31.2304
+            mapCenterLng = 121.4737
+        }
+    }
+
+    // Debounced center coordinate listener to fetch actual reverse geocoded address and nearby POIs
+    LaunchedEffect(mapCenterLat, mapCenterLng, isFujianOfflineMode) {
+        delay(600)
+        if (isFujianOfflineMode) {
+            // Under offline mode, we calculate nearest points natively from local Fujian cache
+            val offlinePois = com.example.location.TencentMapHelper.offlineFujianPois
+            val nearest = offlinePois.minByOrNull {
+                val dLat = it.lat - mapCenterLat
+                val dLng = it.lng - mapCenterLng
+                dLat * dLat + dLng * dLng
+            }
+            if (nearest != null) {
+                selectedPointName = nearest.title + " (" + nearest.address + ") [离线推荐]"
+                tencentPois = offlinePois.sortedBy {
+                    val dLat = it.lat - mapCenterLat
+                    val dLng = it.lng - mapCenterLng
+                    dLat * dLat + dLng * dLng
+                }.take(12)
+            }
+        } else {
+            try {
+                val tencentResult = com.example.location.TencentMapHelper.getAddressAndPoisFromCoordinate(mapCenterLat, mapCenterLng)
+                if (tencentResult != null) {
+                    selectedPointName = tencentResult.first
+                    tencentPois = tencentResult.second
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("IntelligentMapSelectorDialog", "Tencent reverse geocoding inside dialog failed", e)
+            }
+        }
+    }
+
+    // Debounced search query autocomplete suggestion fetching (Offline / Local Database Aware)
+    LaunchedEffect(searchQuery, isFujianOfflineMode) {
+        if (isFujianOfflineMode) {
+            val offlineMatches = com.example.location.TencentMapHelper.searchOfflineFujian(searchQuery)
+            tencentPois = offlineMatches
+            if (searchQuery.isNotBlank() && offlineMatches.isNotEmpty()) {
+                mapCenterLat = offlineMatches[0].lat
+                mapCenterLng = offlineMatches[0].lng
+            }
+        } else {
+            if (searchQuery.isNotBlank() && searchQuery.trim().length >= 2) {
+                delay(500)
+                isSearching = true
+                try {
+                    val results = com.example.location.TencentMapHelper.getSearchSuggestions(searchQuery.trim())
+                    if (results.isNotEmpty()) {
+                        tencentPois = results
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("IntelligentMapSelectorDialog", "Tencent suggestion search failed", e)
+                } finally {
+                    isSearching = false
+                }
+            } else if (searchQuery.isBlank()) {
+                // Restore nearby POIs
+                try {
+                    val tencentResult = com.example.location.TencentMapHelper.getAddressAndPoisFromCoordinate(mapCenterLat, mapCenterLng)
+                    if (tencentResult != null) {
+                        tencentPois = tencentResult.second
+                    }
+                } catch (e: Exception) {
+                    // Ignore
+                }
+            }
+        }
     }
 
     androidx.compose.ui.window.Dialog(
@@ -2693,8 +2785,8 @@ fun IntelligentMapSelectorDialog(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "内置免费智能地图已配置 - 选择" + (if (targetField == "FROM") "【取货/购买】" else "【收货/送达】") + "位点",
-                            fontSize = 14.sp,
+                            text = if (isFujianOfflineMode) "内置离线福建地图已加载 (支持无网搜索)" else "内置腾讯云实时地图已结合 (缩放支持高精度)",
+                            fontSize = 13.sp,
                             fontWeight = FontWeight.Black,
                             color = Color(0xFF222222)
                         )
@@ -2712,9 +2804,54 @@ fun IntelligentMapSelectorDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
-                // Elegant Search/Filter textfield
+                // ==================== ONLINE vs OFFLINE SELECTOR TABS ====================
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFFF1EDE4))
+                        .padding(3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (!isFujianOfflineMode) Color(0xFFFFD100) else Color.Transparent)
+                            .clickable { isFujianOfflineMode = false }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "🌐 腾讯云全国实时地图",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (!isFujianOfflineMode) Color(0xFF222222) else Color(0xFF666666)
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isFujianOfflineMode) Color(0xFFFFA000) else Color.Transparent)
+                            .clickable { isFujianOfflineMode = true }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "🏔️ 福建本地缓存 (离线福建地图)",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isFujianOfflineMode) Color(0xFF222222) else Color(0xFF666666)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Elegant Search/Filter textfield with Manual Search Button
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -2722,7 +2859,7 @@ fun IntelligentMapSelectorDialog(
                         .clip(RoundedCornerShape(12.dp))
                         .background(Color.White)
                         .border(1.dp, Color(0xFFEBE5C8), RoundedCornerShape(12.dp))
-                        .padding(horizontal = 12.dp),
+                        .padding(horizontal = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
@@ -2731,12 +2868,18 @@ fun IntelligentMapSelectorDialog(
                         tint = Color(0xFF999999),
                         modifier = Modifier.size(18.dp)
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     val searchColors = SearchTextFieldDefaults()
                     OutlinedTextField(
                         value = searchQuery,
                         onValueChange = { searchQuery = it },
-                        placeholder = { Text("搜索附近地标、写字楼、商圈...", color = Color(0xFFB0AA90), fontSize = 12.sp) },
+                        placeholder = { 
+                            Text(
+                                text = if (isFujianOfflineMode) "搜福建小区、店铺、门牌号 (如:世欧王庄)..." else "输入查找全国任意小区/铺面/门牌...", 
+                                color = Color(0xFFB0AA90), 
+                                fontSize = 11.sp
+                            ) 
+                        },
                         colors = searchColors,
                         singleLine = true,
                         modifier = Modifier
@@ -2757,135 +2900,124 @@ fun IntelligentMapSelectorDialog(
                             )
                         }
                     }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    // Manual Instant Search Trigger Button
+                    Button(
+                        onClick = {
+                            isSearching = true
+                            if (isFujianOfflineMode) {
+                                val results = com.example.location.TencentMapHelper.searchOfflineFujian(searchQuery)
+                                tencentPois = results
+                                if (results.isNotEmpty()) {
+                                    mapCenterLat = results[0].lat
+                                    mapCenterLng = results[0].lng
+                                }
+                                isSearching = false
+                            } else {
+                                coroutineScope.launch {
+                                    try {
+                                        val results = com.example.location.TencentMapHelper.getSearchSuggestions(searchQuery.trim())
+                                        if (results.isNotEmpty()) {
+                                            tencentPois = results
+                                        }
+                                    } catch (e: Exception) {
+                                        android.util.Log.e("IntelligentMapSelectorDialog", "Manual query trigger failed", e)
+                                    } finally {
+                                        isSearching = false
+                                    }
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFFFD100),
+                            contentColor = Color(0xFF222222)
+                        ),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxHeight().padding(vertical = 4.dp)
+                    ) {
+                        Text("搜索", fontSize = 11.sp, fontWeight = FontWeight.Black)
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // ==================== THE VECTOR VECTOR MAP CANVAS ====================
+                // ==================== GOOGLE/TENCENT DIRECT MAP BOX ====================
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1.1f)
                         .clip(RoundedCornerShape(16.dp))
                         .border(1.dp, Color(0xFFE2DCB8), RoundedCornerShape(16.dp))
-                        .background(Color(0xFFE8F5E9)) // Ambient soft green-cream terrain bg
-                        .pointerInput(Unit) {
-                            detectVerticalDragGestures(
-                                onVerticalDrag = { change, dragAmount ->
+                        .background(Color(0xFFE8F5E9))
+                        .pointerInput(zoomLevel) {
+                            detectDragGestures(
+                                onDrag = { change, dragAmount ->
                                     change.consume()
-                                    mapScrollY += dragAmount
+                                    val scale = 0.0000015f * (20 - zoomLevel).coerceIn(1, 5)
+                                    mapCenterLng -= dragAmount.x * scale
+                                    mapCenterLat += dragAmount.y * scale
                                 }
                             )
                         }
                 ) {
-                    // Let's paint beautiful vectorized city elements
-                    Canvas(
-                        modifier = Modifier.fillMaxSize()
+                    // Load Tencent Static Map dynamically using Coil AsyncImage!
+                    val staticMapUrl = com.example.location.TencentMapHelper.getStaticMapUrl(
+                        lat = mapCenterLat,
+                        lng = mapCenterLng,
+                        width = 480,
+                        height = 360,
+                        zoom = zoomLevel
+                    )
+
+                    AsyncImage(
+                        model = staticMapUrl,
+                        contentDescription = "Tencent Map Static View",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                    )
+
+                    // Zoom Controls Overlay (+ and - buttons) - Enables high fidelity zooming on actual map
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        val width = size.width
-                        val height = size.height
-                        
-                        // Centering offsets
-                        val centerX = width / 2f + mapScrollX
-                        val centerY = height / 2f + mapScrollY
-
-                        // 1. Draw river (Huangpu River styling)
-                        val riverPath = Path().apply {
-                            moveTo(0f, height * 0.75f + mapScrollY)
-                            cubicTo(
-                                width * 0.35f, height * 0.68f + mapScrollY,
-                                width * 0.65f, height * 0.42f + mapScrollY,
-                                width, height * 0.3f + mapScrollY
-                            )
+                        IconButton(
+                            onClick = { if (zoomLevel < 18) zoomLevel++ },
+                            modifier = Modifier
+                                .size(36.dp)
+                                .shadow(2.dp, CircleShape)
+                                .background(Color.White, CircleShape)
+                        ) {
+                            Text("+", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF222222))
                         }
-                        drawPath(
-                            path = riverPath,
-                            color = Color(0xFFB3E5FC),
-                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 44f, cap = StrokeCap.Round)
-                        )
-
-                        // 2. Draw Green Parks (Pudong Century Park style)
-                        drawCircle(
-                            color = Color(0xFFA5D6A7),
-                            radius = 120f,
-                            center = androidx.compose.ui.geometry.Offset(width * 0.22f + mapScrollX, height * 0.25f + mapScrollY)
-                        )
-                        drawRoundRect(
-                            color = Color(0xFFC8E6C9),
-                            topLeft = androidx.compose.ui.geometry.Offset(width * 0.7f + mapScrollX, height * 0.65f + mapScrollY),
-                            size = androidx.compose.ui.geometry.Size(180f, 100f),
-                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(16f, 16f)
-                        )
-
-                        // 3. Gray Residential Grid Blocks
-                        val gridPaintColor = Color(0xFFF1EDE4)
-                        for (i in 0..4) {
-                            for (j in 0..4) {
-                                if (i != 2 && j != 2) {
-                                    drawRoundRect(
-                                        color = gridPaintColor,
-                                        topLeft = androidx.compose.ui.geometry.Offset(i * 180f - 100f + mapScrollX * 0.4f, j * 180f - 120f + mapScrollY * 0.4f),
-                                        size = androidx.compose.ui.geometry.Size(120f, 95f),
-                                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(8f, 8f)
-                                    )
-                                }
-                            }
+                        IconButton(
+                            onClick = { if (zoomLevel > 10) zoomLevel-- },
+                            modifier = Modifier
+                                .size(36.dp)
+                                .shadow(2.dp, CircleShape)
+                                .background(Color.White, CircleShape)
+                        ) {
+                            Text("-", fontWeight = FontWeight.Bold, fontSize = 20.sp, color = Color(0xFF222222))
                         }
-
-                        // 4. City highways/roads lines
-                        // Main avenue y-cross
-                        drawLine(
-                            color = Color(0xFFFFF9C4),
-                            start = androidx.compose.ui.geometry.Offset(0f, height / 2f + mapScrollY),
-                            end = androidx.compose.ui.geometry.Offset(width, height / 2f + mapScrollY),
-                            strokeWidth = 24f
-                        )
-                        drawLine(
-                            color = Color(0xFFFFF9C4),
-                            start = androidx.compose.ui.geometry.Offset(width / 2f + mapScrollX, 0f),
-                            end = androidx.compose.ui.geometry.Offset(width / 2f + mapScrollX, height),
-                            strokeWidth = 24f
-                        )
-                        
-                        // Dashed road lines divider markings
-                        drawLine(
-                            color = Color(0xFFFFA000),
-                            start = androidx.compose.ui.geometry.Offset(0f, height / 2f + mapScrollY),
-                            end = androidx.compose.ui.geometry.Offset(width, height / 2f + mapScrollY),
-                            strokeWidth = 2f
-                        )
-
-                        // 5. User's current location radar pulse dot (GPS anchor)
-                        val pulseAnchorX = width * 0.5f + mapScrollX
-                        val pulseAnchorY = height * 0.42f + mapScrollY
-                        
-                        drawCircle(
-                            color = Color(0xFF3F51B5).copy(alpha = pulseAlpha),
-                            radius = pulseRadius,
-                            center = androidx.compose.ui.geometry.Offset(pulseAnchorX, pulseAnchorY)
-                        )
-                        
-                        drawCircle(
-                            color = Color(0xFF2196F3),
-                            radius = 12f,
-                            center = androidx.compose.ui.geometry.Offset(pulseAnchorX, pulseAnchorY)
-                        )
-                        drawCircle(
-                            color = Color.White,
-                            radius = 6f,
-                            center = androidx.compose.ui.geometry.Offset(pulseAnchorX, pulseAnchorY)
-                        )
                     }
 
                     // Floating GPS Snapper button
                     IconButton(
                         onClick = {
-                            // Centering map offset
-                            mapScrollX = 0f
-                            mapScrollY = 0f
-                            // Trigger real high precision GPS positioning and reverse-geocoding
-                            mainViewModel.autoAcquireDetailedLocation(context, targetField) { resolvedAddress ->
-                                selectedPointName = resolvedAddress
+                            if (isFujianOfflineMode) {
+                                // Reset to Fuzhou core coordinate offline
+                                mapCenterLat = 26.0745
+                                mapCenterLng = 119.2965
+                                selectedPointName = "福建省立医院 (离线GPS已锁定)"
+                            } else {
+                                mainViewModel.autoAcquireDetailedLocation(context, targetField) { resolvedAddress ->
+                                    selectedPointName = resolvedAddress
+                                    mapCenterLat = mainViewModel.userCoordinates.value.first
+                                    mapCenterLng = mainViewModel.userCoordinates.value.second
+                                }
                             }
                         },
                         modifier = Modifier
@@ -2903,7 +3035,7 @@ fun IntelligentMapSelectorDialog(
                         )
                     }
 
-                    // Centred hovering map pointer icon
+                    // Centered hovering map pointer icon
                     Box(
                         modifier = Modifier
                             .align(Alignment.Center)
@@ -2946,7 +3078,7 @@ fun IntelligentMapSelectorDialog(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "拖拽地图以精确定位高德中心点",
+                                text = "拖拽腾讯坐标定位 · 当前缩放级:$zoomLevel",
                                 color = Color.White,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold
@@ -2957,12 +3089,12 @@ fun IntelligentMapSelectorDialog(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // POI hotspots listing
+                // POI hotspots listing header
                 Text(
-                    text = "附近搜索到的实景推荐点 (推荐免费选择)",
-                    fontSize = 11.sp,
+                    text = if (isFujianOfflineMode) "🏔️ 福建本地高精度推荐位点 (极速响应)" else "附近搜索到的实景推荐点",
+                    fontSize = 12.sp,
                     fontWeight = FontWeight.ExtraBold,
-                    color = Color(0xFF555555),
+                    color = Color(0xFF444444),
                     modifier = Modifier.padding(bottom = 6.dp)
                 )
 
@@ -2972,13 +3104,19 @@ fun IntelligentMapSelectorDialog(
                         .weight(0.9f),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(filteredHotspots) { option ->
-                        val isSel = option == selectedPointName
+                    items(tencentPois) { poi ->
+                        val isSel = poi.title == selectedPointName || selectedPointName.contains(poi.title)
+                        val badgeInfo = getPoiCategoryBadge(poi.title, poi.address)
+                        
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { selectedPointName = option },
-                            shape = RoundedCornerShape(10.dp),
+                                .clickable {
+                                    selectedPointName = poi.title + " (" + poi.address + ")"
+                                    mapCenterLat = poi.lat
+                                    mapCenterLng = poi.lng
+                                },
+                            shape = RoundedCornerShape(12.dp),
                             colors = CardDefaults.cardColors(
                                 containerColor = if (isSel) Color(0xFFFFFBE6) else Color.White
                             ),
@@ -2998,15 +3136,57 @@ fun IntelligentMapSelectorDialog(
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = option,
-                                    fontSize = 12.sp,
-                                    fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
-                                    color = Color(0xFF333333),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = poi.title,
+                                            fontSize = 12.sp,
+                                            fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium,
+                                            color = Color(0xFF222222),
+                                            modifier = Modifier.weight(1f, fill = false),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        // Visual Badge Tag (Residential Complex, Store, or door address)
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(4.dp))
+                                                .background(badgeInfo.second)
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                text = badgeInfo.first,
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = badgeInfo.third
+                                            )
+                                        }
+                                    }
+                                    if (poi.address.isNotBlank()) {
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = poi.address,
+                                            fontSize = 10.sp,
+                                            color = Color.Gray,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
                             }
+                        }
+                    }
+                    if (tencentPois.isEmpty()) {
+                        item {
+                            Text(
+                                text = if (isSearching) "正在全库检索中..." else "未找到任何匹配位点，请重新搜索或拖拽地图",
+                                fontSize = 11.sp,
+                                color = Color.Gray,
+                                modifier = Modifier.padding(12.dp)
+                            )
                         }
                     }
                 }
@@ -5204,190 +5384,165 @@ fun AndroidVectorInteractiveMap(
     isContinuous: Boolean = false,
     filteringMode: Int = 2
 ) {
-    // Map bounds (lat: 31.215 - 31.250, lng: 121.450 - 121.510)
-    Canvas(
-        modifier = Modifier
-            .fillMaxSize()
-            .pointerInput(parcels, userCoords) {
-                detectTapGestures { offset ->
-                    val width = size.width
-                    val height = size.height
-                    
-                    parcels.forEach { p ->
-                        val yRatio = 1.0 - ((p.latitude - 31.215) / 0.035).coerceIn(0.0, 1.0)
-                        val xRatio = ((p.longitude - 121.450) / 0.060).coerceIn(0.0, 1.0)
-                        val pX = xRatio * width
-                        val pY = yRatio * height
+    var mainMapZoom by remember { mutableStateOf(15) }
+    val zoomFactor = Math.pow(2.0, (mainMapZoom - 15).toDouble()).toFloat()
+    val scaleLng = 55000f * zoomFactor
+    val scaleLat = 65000f * zoomFactor
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Load Tencent Static Map for the background centered directly on userCoords GCJ-02!
+        val staticMapBgUrl = com.example.location.TencentMapHelper.getStaticMapUrl(
+            lat = userCoords.first,
+            lng = userCoords.second,
+            width = 600,
+            height = 240,
+            zoom = mainMapZoom
+        )
+
+        AsyncImage(
+            model = staticMapBgUrl,
+            contentDescription = "Tencent Live Map Background",
+            modifier = Modifier.fillMaxSize(),
+            contentScale = androidx.compose.ui.layout.ContentScale.Crop
+        )
+
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(parcels, userCoords, scaleLng, scaleLat) {
+                    detectTapGestures { offset ->
+                        val width = size.width
+                        val height = size.height
                         
-                        val distance = Math.sqrt(Math.pow((offset.x - pX).toDouble(), 2.0) + Math.pow((offset.y - pY).toDouble(), 2.0))
-                        if (distance < 30.0) {
-                            onNodeClick(p.id)
+                        parcels.forEach { p ->
+                            val pX = width / 2f + (p.longitude - userCoords.second) * scaleLng
+                            val pY = height / 2f - (p.latitude - userCoords.first) * scaleLat
+                            
+                            val distance = Math.sqrt(Math.pow((offset.x - pX).toDouble(), 2.0) + Math.pow((offset.y - pY).toDouble(), 2.0))
+                            if (distance < 30.0) {
+                                onNodeClick(p.id)
+                            }
                         }
                     }
                 }
-            }
-    ) {
-        val width = size.width
-        val height = size.height
+        ) {
+            val width = size.width
+            val height = size.height
 
-        // 1. Draw elegant maps grid background
-        drawRect(color = Color(0xFFF9F7EF))
+            // 1. Draw elegant semitransparent maps grid background overlay for sci-fi look
+            drawRect(color = Color(0x1F222222))
 
-        // 2. Draw Simulated River (Huangpu River styling)
-        val riverPath = Path().apply {
-            moveTo(width * 0.7f, 0f)
-            cubicTo(
-                width * 0.65f, height * 0.3f,
-                width * 0.85f, height * 0.7f,
-                width * 0.8f, height
-            )
-            lineTo(width, height)
-            lineTo(width, 0f)
-            close()
-        }
-        drawPath(path = riverPath, color = Color(0xFFD6E4FA))
+            // 2. Draw Parcel Markers from the State database (Point 5)
+            parcels.forEach { p ->
+                val pX = width / 2f + (p.longitude - userCoords.second) * scaleLng
+                val pY = height / 2f - (p.latitude - userCoords.first) * scaleLat
 
-        // 3. Draw Grid Streets lines representing city blocks
-        val gridLinesColor = Color(0xFFE5DEC9)
-        val streetStroke = 4f
-        
-        // Horizontal Streets
-        for (i in 1..5) {
-            val y = height * (i / 6.0f)
-            drawLine(
-                color = gridLinesColor,
-                start = androidx.compose.ui.geometry.Offset(0f, y),
-                end = androidx.compose.ui.geometry.Offset(width, y),
-                strokeWidth = streetStroke
-            )
-        }
-        // Vertical Streets
-        for (i in 1..5) {
-            val x = width * (i / 6.0f)
-            drawLine(
-                color = gridLinesColor,
-                start = androidx.compose.ui.geometry.Offset(x, 0f),
-                end = androidx.compose.ui.geometry.Offset(x, height),
-                strokeWidth = streetStroke
-            )
-        }
+                val isHighlighted = p.id == highlightedId
+                
+                // Draw Pulsating Background
+                if (isHighlighted) {
+                    drawCircle(
+                        color = Color(0xAAFFD100),
+                        radius = 32f,
+                        center = androidx.compose.ui.geometry.Offset(pX.toFloat(), pY.toFloat())
+                    )
+                } else {
+                    drawCircle(
+                        color = Color(0x66FFA000),
+                        radius = 18f,
+                        center = androidx.compose.ui.geometry.Offset(pX.toFloat(), pY.toFloat())
+                    )
+                }
 
-        // Draw highway lanes
-        drawLine(
-            color = Color(0xFFFFF9DE),
-            start = androidx.compose.ui.geometry.Offset(0f, height * 0.4f),
-            end = androidx.compose.ui.geometry.Offset(width, height * 0.4f),
-            strokeWidth = 14f
-        )
-        drawLine(
-            color = Color(0xFFFFD54F),
-            start = androidx.compose.ui.geometry.Offset(0f, height * 0.4f),
-            end = androidx.compose.ui.geometry.Offset(width, height * 0.4f),
-            strokeWidth = 2f
-        )
-
-        drawLine(
-            color = Color(0xFFFFF9DE),
-            start = androidx.compose.ui.geometry.Offset(width * 0.45f, 0f),
-            end = androidx.compose.ui.geometry.Offset(width * 0.45f, height),
-            strokeWidth = 14f
-        )
-        drawLine(
-            color = Color(0xFFFFD54F),
-            start = androidx.compose.ui.geometry.Offset(width * 0.45f, 0f),
-            end = androidx.compose.ui.geometry.Offset(width * 0.45f, height),
-            strokeWidth = 2f
-        )
-
-        // 4. Draw Parcel Markers from the State database (Point 5)
-        parcels.forEach { p ->
-            val yRatio = 1.0 - ((p.latitude - 31.215) / 0.035).coerceIn(0.0, 1.0)
-            val xRatio = ((p.longitude - 121.450) / 0.060).coerceIn(0.0, 1.0)
-            val pX = xRatio * width
-            val pY = yRatio * height
-
-            val isHighlighted = p.id == highlightedId
-            
-            // Draw Pulsating Background
-            if (isHighlighted) {
+                // Draw pin anchor
                 drawCircle(
-                    color = Color(0x66FFD100),
-                    radius = 32f,
+                    color = if (isHighlighted) Color(0xFFFFA000) else Color(0xFFE65100),
+                    radius = 12f,
                     center = androidx.compose.ui.geometry.Offset(pX.toFloat(), pY.toFloat())
                 )
+
+                drawCircle(
+                    color = Color.White,
+                    radius = 5f,
+                    center = androidx.compose.ui.geometry.Offset(pX.toFloat(), pY.toFloat())
+                )
+            }
+
+            // 3. Draw User current location locator with pulsating halo (Point 2 display)
+            if (isContinuous) {
+                // Visualize all three models side-by-side using Tencent relative offsets!
+                
+                // 1. Raw Jittery coordinates (Red bouncing dots representing unstable raw satellite stream)
+                val rx = width / 2f + (rawCoords.second - userCoords.second) * scaleLng
+                val ry = height / 2f - (rawCoords.first - userCoords.first) * scaleLat
+                drawCircle(color = Color(0x33F44336), radius = 30f, center = androidx.compose.ui.geometry.Offset(rx.toFloat(), ry.toFloat()))
+                drawCircle(color = Color(0xFFE53935), radius = 6f, center = androidx.compose.ui.geometry.Offset(rx.toFloat(), ry.toFloat()))
+
+                // 2. Kalman Filtered coordinates (Orange dots showing smooth filtering without offset corrections)
+                val sx = width / 2f + (smoothCoords.second - userCoords.second) * scaleLng
+                val sy = height / 2f - (smoothCoords.first - userCoords.first) * scaleLat
+                drawCircle(color = Color(0x33FF9800), radius = 34f, center = androidx.compose.ui.geometry.Offset(sx.toFloat(), sy.toFloat()))
+                drawCircle(color = Color(0xFFFB8C00), radius = 6f, center = androidx.compose.ui.geometry.Offset(sx.toFloat(), sy.toFloat()))
+
+                // 3. GCJ-02 calibrated coordinates (Blue glowing locator which snaps perfectly with roads!)
+                val cx = width / 2f + (calibratedCoords.second - userCoords.second) * scaleLng
+                val cy = height / 2f - (calibratedCoords.first - userCoords.first) * scaleLat
+                drawCircle(color = Color(0x552196F3), radius = 44f, center = androidx.compose.ui.geometry.Offset(cx.toFloat(), cy.toFloat()))
+                drawCircle(color = Color.White, radius = 10f, center = androidx.compose.ui.geometry.Offset(cx.toFloat(), cy.toFloat()))
+                drawCircle(color = Color(0xFF1E88E5), radius = 6f, center = androidx.compose.ui.geometry.Offset(cx.toFloat(), cy.toFloat()))
             } else {
+                val uX = width / 2f
+                val uY = height / 2f
+
                 drawCircle(
-                    color = Color(0x33FFA000),
-                    radius = 18f,
-                    center = androidx.compose.ui.geometry.Offset(pX.toFloat(), pY.toFloat())
+                    color = Color(0x331E88E5),
+                    radius = 44f,
+                    center = androidx.compose.ui.geometry.Offset(uX, uY)
+                )
+                drawCircle(
+                    color = Color(0x551E88E5),
+                    radius = 24f,
+                    center = androidx.compose.ui.geometry.Offset(uX, uY)
+                )
+                // Pulsating glowing blue GPS pin dot
+                drawCircle(
+                    color = Color.White,
+                    radius = 12f,
+                    center = androidx.compose.ui.geometry.Offset(uX, uY)
+                )
+                drawCircle(
+                    color = Color(0xFF1976D2),
+                    radius = 8f,
+                    center = androidx.compose.ui.geometry.Offset(uX, uY)
                 )
             }
-
-            // Draw pin anchor
-            drawCircle(
-                color = if (isHighlighted) Color(0xFFFFA000) else Color(0xFFE65100),
-                radius = 12f,
-                center = androidx.compose.ui.geometry.Offset(pX.toFloat(), pY.toFloat())
-            )
-
-            drawCircle(
-                color = Color.White,
-                radius = 5f,
-                center = androidx.compose.ui.geometry.Offset(pX.toFloat(), pY.toFloat())
-            )
         }
 
-        // 5. Draw User current location locator with pulsating halo (Point 2 display)
-        if (isContinuous) {
-            // Visualize all three models side-by-side! This is incredibly informative!
-            
-            // 1. Raw Jittery coordinates (Red bouncing dots representing unstable raw satellite stream)
-            val ry = (1.0 - ((rawCoords.first - 31.215) / 0.035).coerceIn(0.0, 1.0)) * height
-            val rx = (((rawCoords.second - 121.450) / 0.060).coerceIn(0.0, 1.0)) * width
-            drawCircle(color = Color(0x22F44336), radius = 30f, center = androidx.compose.ui.geometry.Offset(rx.toFloat(), ry.toFloat()))
-            drawCircle(color = Color(0xFFE53935), radius = 6f, center = androidx.compose.ui.geometry.Offset(rx.toFloat(), ry.toFloat()))
-
-            // 2. Kalman Filtered coordinates (Orange dots showing smooth filtering without offset corrections)
-            val sy = (1.0 - ((smoothCoords.first - 31.215) / 0.035).coerceIn(0.0, 1.0)) * height
-            val sx = (((smoothCoords.second - 121.450) / 0.060).coerceIn(0.0, 1.0)) * width
-            drawCircle(color = Color(0x22FF9800), radius = 34f, center = androidx.compose.ui.geometry.Offset(sx.toFloat(), sy.toFloat()))
-            drawCircle(color = Color(0xFFFB8C00), radius = 6f, center = androidx.compose.ui.geometry.Offset(sx.toFloat(), sy.toFloat()))
-
-            // 3. GCJ-02 calibrated coordinates (Blue glowing locator which snaps perfectly with roads!)
-            val cy = (1.0 - ((calibratedCoords.first - 31.215) / 0.035).coerceIn(0.0, 1.0)) * height
-            val cx = (((calibratedCoords.second - 121.450) / 0.060).coerceIn(0.0, 1.0)) * width
-            drawCircle(color = Color(0x442196F3), radius = 44f, center = androidx.compose.ui.geometry.Offset(cx.toFloat(), cy.toFloat()))
-            drawCircle(color = Color.White, radius = 10f, center = androidx.compose.ui.geometry.Offset(cx.toFloat(), cy.toFloat()))
-            drawCircle(color = Color(0xFF1E88E5), radius = 6f, center = androidx.compose.ui.geometry.Offset(cx.toFloat(), cy.toFloat()))
-        } else {
-            val latCenter = userCoords.first
-            val lngCenter = userCoords.second
-            val userYRatio = 1.0 - ((latCenter - 31.215) / 0.035).coerceIn(0.0, 1.0)
-            val userXRatio = ((lngCenter - 121.450) / 0.060).coerceIn(0.0, 1.0)
-            val uX = userXRatio * width
-            val uY = userYRatio * height
-
-            drawCircle(
-                color = Color(0x331E88E5),
-                radius = 44f,
-                center = androidx.compose.ui.geometry.Offset(uX.toFloat(), uY.toFloat())
-            )
-            drawCircle(
-                color = Color(0x551E88E5),
-                radius = 24f,
-                center = androidx.compose.ui.geometry.Offset(uX.toFloat(), uY.toFloat())
-            )
-            // Pulsating glowing blue GPS pin dot
-            drawCircle(
-                color = Color.White,
-                radius = 12f,
-                center = androidx.compose.ui.geometry.Offset(uX.toFloat(), uY.toFloat())
-            )
-            drawCircle(
-                color = Color(0xFF1976D2),
-                radius = 8f,
-                center = androidx.compose.ui.geometry.Offset(uX.toFloat(), uY.toFloat())
-            )
+        // Live Zoom Buttons Overlay inside Main Home Screen Map!
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            IconButton(
+                onClick = { if (mainMapZoom < 18) mainMapZoom++ },
+                modifier = Modifier
+                    .size(28.dp)
+                    .shadow(1.dp, CircleShape)
+                    .background(Color.White.copy(alpha = 0.9f), CircleShape)
+            ) {
+                Text("+", fontWeight = FontWeight.Black, fontSize = 12.sp, color = Color(0xFF222222))
+            }
+            IconButton(
+                onClick = { if (mainMapZoom > 10) mainMapZoom-- },
+                modifier = Modifier
+                    .size(28.dp)
+                    .shadow(1.dp, CircleShape)
+                    .background(Color.White.copy(alpha = 0.9f), CircleShape)
+            ) {
+                Text("-", fontWeight = FontWeight.Black, fontSize = 14.sp, color = Color(0xFF222222))
+            }
         }
     }
 }
