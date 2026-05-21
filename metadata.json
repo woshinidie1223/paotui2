@@ -1,0 +1,6 @@
+{
+  "name": "速达跑腿",
+  "description": "速达跑腿是一款模拟极速秒杀与跑腿服务的高端用户端App。本应用实现了极致体验的秒杀按钮状态机、高并发请求分级引擎、完整的手机底层网络拦截框架，并且提供完整的邮箱验证注册功能与跑腿订单智能估算下单服务。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

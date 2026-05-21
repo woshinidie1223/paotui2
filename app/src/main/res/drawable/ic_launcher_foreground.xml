@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Subtle drop shadow offset for the lightning bolt -->
+    <path
+        android:fillColor="#1F000000"
+        android:pathData="M64.64,15.96 L32.24,62.40 L59.24,62.40 L47.36,98.04 L79.76,51.60 L52.76,51.60 Z" />
+    <!-- Main premium deep charcoal lightning bolt matching the screen logo -->
+    <path
+        android:fillColor="#222222"
+        android:pathData="M62.64,12.96 L30.24,59.40 L57.24,59.40 L45.36,95.04 L77.76,48.60 L50.76,48.60 Z" />
+</vector>
